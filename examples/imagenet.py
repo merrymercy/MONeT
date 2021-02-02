@@ -1,10 +1,12 @@
 import argparse
+import json
 import os
 import random
 import shutil
 import time
 import warnings
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -51,7 +53,7 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
 parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)',
                     dest='weight_decay')
-parser.add_argument('-p', '--print-freq', default=10, type=int,
+parser.add_argument('-p', '--print-freq', default=2, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -296,15 +298,21 @@ def main_worker(gpu, ngpus_per_node, args):
             }, is_best)
 
 
+train_step_ct = 0
+train_max_batch = 0
+train_ips_list = []
+
+
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
+    ips = AverageMeter('IPS', ':.1f')
     progress = ProgressMeter(
         len(train_loader),
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, losses, top1, top5, ips],
         prefix="Epoch: [{}]".format(epoch))
 
     # switch to train mode
@@ -339,11 +347,38 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             optimizer.step()
 
         # measure elapsed time
-        batch_time.update(time.time() - end)
+        bs = len(images)
+        batch_total_time = time.time() - end
+        train_ips = bs / batch_total_time
+        batch_time.update(batch_total_time)
+        ips.update(train_ips)
         end = time.time()
 
         if i % args.print_freq == 0:
             progress.display(i)
+
+        if True:
+            global train_step_ct, train_ips_list, train_max_batch
+            train_ips_list.append(train_ips)
+            train_max_batch = max(train_max_batch, bs)
+            if train_step_ct >= 4:
+                train_ips = np.median(train_ips_list)
+                res = "BatchSize: %d\tIPS: %.2f\t,Cost: %.2f ms" % (
+                    bs, train_ips, 1000.0 / train_ips)
+                print(res, flush=True)
+                out_file = 'speed_results.json'
+                with open(out_file, "a") as fout:
+                    val_dict = {
+                        "network": args.arch,
+                        "algorithm": "monet",
+                        "batch_size": train_max_batch,
+                        "ips": train_ips
+                    }
+                    fout.write(json.dumps(val_dict) + "\n")
+                print(f"save results to {out_file}")
+                exit()
+
+            train_step_ct += 1
 
 
 def validate(val_loader, model, criterion, args):
@@ -417,9 +452,9 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
     def __str__(self):
-        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        #fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        fmtstr = '{name} {val' + self.fmt + '}'
         return fmtstr.format(**self.__dict__)
-
 
 class ProgressMeter(object):
     def __init__(self, num_batches, meters, prefix=""):
